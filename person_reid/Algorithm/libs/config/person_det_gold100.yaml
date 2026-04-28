@@ -1,0 +1,5 @@
+path: D:/reidbise-yolov12/datasets/person_det
+train: images/train
+val: images/val_gold_100
+names:
+  0: person

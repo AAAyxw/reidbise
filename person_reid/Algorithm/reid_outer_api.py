@@ -89,7 +89,7 @@ class ReidPipeline(object):
     def extract(self, img):
         _each_img_norm_feat = self._extractor(img)
         return _each_img_norm_feat
-    
+ #匹配判定   
     def search(self, img, bboxs, thresh=0.2):
         search_labels_list, search_dist_list = [], []
         before_sort_list = []

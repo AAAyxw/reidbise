@@ -18,4 +18,13 @@ person_reid/GUI/outputs/
 
 # ===== Python 缓存 =====
 __pycache__/
-*.pyc
+*.pyc".venv/" 
+"datasets/" 
+"runs_compare/" 
+.venv/
+datasets/
+reid_models.zip
+runs_compare/
+__pycache__/
+*.pt
+*.onnx

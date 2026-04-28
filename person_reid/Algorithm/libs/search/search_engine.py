@@ -6,7 +6,7 @@ import numpy as np
 import faiss 
 from Algorithm.libs.logger.log import get_logger
 log_info = get_logger(__name__)
-
+#向量检索
 class SearchEngine(object):
     def __init__(self, base_feat_lists, base_idx_lists, dims=1024):
         if len(base_idx_lists) > 0:

@@ -1,0 +1,5 @@
+path: D:\reidbise-yolov12\person_reid\Algorithm\libs\config\person_det.yaml
+train: images/train
+val: images/val
+names:
+  0: person

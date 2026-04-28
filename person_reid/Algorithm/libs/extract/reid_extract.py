@@ -29,7 +29,7 @@ class ReIdExtract(object):
                         ])
         log_info.info("{} model loaded!!! The shape is {}_{}.".format(onnx_model, self.input_width, self.input_height))
 
-    
+#特征编码 
     def __call__(self, image_data, norm_feat=True):
         image_data = Image.fromarray(cv2.cvtColor(image_data,cv2.COLOR_BGR2RGB))
         img = self.transform(image_data)

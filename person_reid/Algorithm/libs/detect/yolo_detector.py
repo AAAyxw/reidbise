@@ -17,6 +17,7 @@ class YoloDetect(object):
         self._model_track = YOLO(model_path)
         log_info.info('{} model load succeed!!!'.format(model_path))
     
+#行人检测
     def detect(self, img, class_idx_list=cfgs.YOLO_DEFAULT_LABEL, min_size = cfgs.YOLO_MIN_SIZE):
         boxes, clss  = [], []
         results = self._model.predict(img, conf=0.2, iou=0.4, classes=class_idx_list)
