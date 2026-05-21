@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-def draw_chinese_box(im, font, box, label="", color=(128, 128, 128)):
+def draw_chinese_box(im, font, box, label="", color=(0, 255, 0)):
     im = Image.fromarray(im)
     lw = max(round(sum(im.size) / 2 * 0.003), 2)
     draw = ImageDraw.Draw(im)
@@ -17,9 +17,9 @@ def draw_chinese_box(im, font, box, label="", color=(128, 128, 128)):
             outside = p1[1] - h >= 0  # label fits outside box
             draw.rectangle(
                 (p1[0], p1[1] - h if outside else p1[1], p1[0] + w + 1, p1[1] + 1 if outside else p1[1] + h + 1),
-                fill=color,
+                fill=(255, 255, 255),  # 白色背景
             )
             # self.draw.text((box[0], box[1]), label, fill=txt_color, font=self.font, anchor='ls')  # for PIL>8.0
-            draw.text((p1[0], p1[1] - h if outside else p1[1]), label, fill=(128,128,128), font=font)
+            draw.text((p1[0], p1[1] - h if outside else p1[1]), label, fill=(0, 0, 0), font=font)  # 黑色字体
     im = np.asarray(im)
     return im

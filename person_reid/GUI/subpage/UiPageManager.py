@@ -39,6 +39,10 @@ class PageManager:
         self.all_db_showTb.setModel(self.sql_model)
         self.all_db_showTb.setColumnHidden(self.sql_model.fieldIndex("image"), True)
         self.all_db_showTb.setColumnHidden(self.sql_model.fieldIndex("feat"), True)
+        if self.sql_model.fieldIndex("image_ir") >= 0:
+            self.all_db_showTb.setColumnHidden(self.sql_model.fieldIndex("image_ir"), True)
+        if self.sql_model.fieldIndex("modality") >= 0:
+            self.sql_model.setHeaderData(self.sql_model.fieldIndex("modality"), Qt.Horizontal, self.tr("Modality"))
         self.all_db_showTb.setSelectionMode(QAbstractItemView.SingleSelection)
         self.all_db_showTb.setSelectionBehavior(QTableView.SelectRows)
         self.all_db_showTb.setEditTriggers(QAbstractItemView.NoEditTriggers)

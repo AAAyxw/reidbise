@@ -20,15 +20,20 @@ from PySide6.QtWidgets import (
                                 QDataWidgetMapper,
                                 QTableView,
                                 QMessageBox,
-                                QHBoxLayout, 
-                                QPushButton, 
-                                QVBoxLayout, 
-                                QWidget, 
+                                QHBoxLayout,
+                                QPushButton,
+                                QVBoxLayout,
+                                QWidget,
+                                QLineEdit,
                             )
 from PySide6.QtGui import QImage, QPixmap, QColor, QStandardItemModel, QStandardItem
 from PySide6.QtSql import QSqlRelation, QSqlRelationalTableModel, QSqlTableModel
-from PySide6.QtCore import Qt, Signal, QObject, QThread
+from PySide6.QtCore import Qt, Signal, QObject, QThread, QTimer, QMetaObject, Q_ARG
 from ultralytics.utils.plotting import Annotator, colors
+
+GUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+CONFIG_DIR = os.path.join(GUI_DIR, "config")
+OUTPUTS_DIR = os.path.join(GUI_DIR, "outputs")
 
 class ProcessThread(QObject):
     debug_msg = Signal(str)
@@ -39,16 +44,30 @@ class ProcessThread(QObject):
     show_img = Signal(np.ndarray)
     show_target_img = Signal(np.ndarray)
     table_info_list = Signal(list)
-
-    def __init__(self, base_feat_lists, base_idx_lists, dims=1024, target_class = "person", device_info = "cpu"):
+    
+    def __init__(
+        self, base_feat_lists, base_idx_lists, dims=None,
+        target_class="person", device_info="cpu", modalities=None,
+    ):
         QObject.__init__(self)
-        self.reid_pipeline = ReidPipeline(base_feat_lists, base_idx_lists, dims=dims, target_class = target_class, device_info = device_info)
+        if dims is None:
+            dims = cfgs.DIMS
+        self.reid_pipeline = ReidPipeline(
+            base_feat_lists, base_idx_lists, dims=dims,
+            target_class=target_class, device_info=device_info, modalities=modalities,
+        )
         self.proc_source_url = ''
+        self.proc_ir_source_url = ''
         self.proc_source_type = None
+        self._ir_capture = None
+        self._ir_static_frame = None
         self.skip_frames = 6
         self.stop_dtc = False
         self.continue_dtc = True
-        self.match_thresh = 0.20
+        self.match_thresh = cfgs.MATCH_DIST_THRESH
+        self.match_min_margin = cfgs.MATCH_MIN_MARGIN
+        self.match_min_cosine_sim = cfgs.MATCH_MIN_COSINE_SIM
+        self.track_lock_dist_thresh = cfgs.TRACK_LOCK_DIST_THRESH
         self.is_track = False
         self.is_show_no_match_item = False
         self.had_track_id_dict = dict()
@@ -57,6 +76,10 @@ class ProcessThread(QObject):
         self.save_dir = "outputs/matches"  # 保存目录
         self.save_threshold = 0.3  # 保存阈值，只保存相似度高于此值的结果
         self.max_matches = 5  # 每个目标保存的最大匹配数量
+        
+        # 帧计数用于控制UI更新频率
+        self.ui_update_counter = 0
+        self.ui_update_interval = 3  # 每处理3帧更新一次UI，降低更新频率避免递归重绘
 
     def save_match_result(self, proc_img, target_box, search_label, similarity, frame_count):
         """保存匹配结果"""
@@ -79,9 +102,36 @@ class ProcessThread(QObject):
         # 保存图像
         cv2.imwrite(save_path, crop_img)
 
-    def reload_faiss(self, dims=cfgs.DIMS):
-        base_feat_lists, base_idx_lists = qt_sql.load_sql_feat_info(cfgs.DB_PATH, cfgs.DB_NAME)
-        self.reid_pipeline.reload_search_engine(base_feat_lists, base_idx_lists, dims)
+    def reload_faiss(self, dims=None):
+        if dims is None:
+            dims = cfgs.DIMS
+        base_feat_lists, base_idx_lists, modality_list = qt_sql.load_sql_feat_info(
+            cfgs.DB_PATH, cfgs.DB_NAME,
+        )
+        self.reid_pipeline.reload_search_engine(
+            base_feat_lists, base_idx_lists, dims, modalities=modality_list,
+        )
+
+    def _read_ir_frame(self, frame_count=0):
+        if not self.proc_ir_source_url:
+            return None
+        if self.proc_ir_source_url.lower().endswith(('.jpg', '.png', '.jpeg', '.tif', '.tiff')):
+            if not hasattr(self, '_ir_static_frame') or self._ir_static_frame is None:
+                self._ir_static_frame = cv2.imread(self.proc_ir_source_url)
+            return self._ir_static_frame
+        if self._ir_capture is None:
+            self._ir_capture = cv2.VideoCapture(self.proc_ir_source_url)
+        ok, ir_frame = self._ir_capture.read()
+        if not ok:
+            self._ir_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, ir_frame = self._ir_capture.read()
+        return ir_frame if ok else None
+
+    def _reset_ir_reader(self):
+        self._ir_static_frame = None
+        if self._ir_capture is not None:
+            self._ir_capture.release()
+            self._ir_capture = None
 
     def proc_start_run_dir_type(self):
         proc_dir_index = 0
@@ -156,13 +206,18 @@ class ProcessThread(QObject):
                         boxes = filter_bbox_list
                     else:
                         self.draw_box(_image, boxes, labels)
-                search_labels_list, search_dist_list, target_box_list, before_sort_list = self.reid_pipeline.search(proc_img, boxes, self.match_thresh)
+                ir_frame = self._read_ir_frame(frame_count)
+                search_labels_list, search_dist_list, target_box_list, before_sort_list, before_dist_list = self.reid_pipeline.search(
+                    proc_img, boxes, self.match_thresh, ir_img=ir_frame,
+                )
                 if _inter_type == 'video':
                     happend_time = round((frame_count + 1)/_fps, 3)
                     if self.is_track and track_ids is not None:
                         for _idx, _e_sort_box in enumerate(boxes):
                             if before_sort_list[_idx] != "unknown":
-                                self.had_track_id_dict[filter_trackid_list[_idx]][1] = before_sort_list[_idx]
+                                dist_val = before_dist_list[_idx]
+                                if dist_val is not None and dist_val <= self.track_lock_dist_thresh:
+                                    self.had_track_id_dict[filter_trackid_list[_idx]][1] = before_sort_list[_idx]
                         search_labels_list.extend([row[1] for row in had_search_trackid_list])
                         target_box_list.extend([row[0] for row in had_search_trackid_list])
                         search_dist_list.extend(["None"]*len(had_search_trackid_list))
@@ -172,7 +227,7 @@ class ProcessThread(QObject):
                     _image = self.draw_match(_image, target_box_list, search_labels_list)
                     for _idx, _e_dist in enumerate(search_dist_list):
 
-                        similarity = 1 - search_dist_list[_idx][0]  # 转换距离为相似度
+                        similarity = 1 - search_dist_list[_idx]  # 转换距离为相似度
                          # 只保存相似度高于阈值的结果
                         if self.save_matches and similarity > self.save_threshold:
                             self.save_match_result(
@@ -182,12 +237,12 @@ class ProcessThread(QObject):
                                 similarity,
                                 frame_count
                             )
-                        rows = [target_file_path, self.reid_pipeline._target_class, frame_count, happend_time, search_dist_list[_idx][0], "{}:{}".format("命中", search_labels_list[_idx]),"[{}]".format(','.join(map(str,map(int, target_box_list[_idx][:4]))))]
+                        rows = [target_file_path, self.reid_pipeline._target_class, frame_count, happend_time, search_dist_list[_idx], "{}:{}".format("命中", search_labels_list[_idx]),"[{}]".format(','.join(map(str,map(int, target_box_list[_idx][:4]))))]
                         self.table_info_list.emit(rows)
                         bb = target_box_list[_idx]
                         crop_img =  proc_img[int(bb[1]):int(bb[3]),int(bb[0]):int(bb[2]),:]
                         self.show_target_img.emit(crop_img)
-                        self.show_match_dist.emit(str(search_dist_list[_idx][0]))
+                        self.show_match_dist.emit(str(search_dist_list[_idx]))
                         self.show_match_id.emit(search_labels_list[_idx])
                         self.show_match_status.emit("命中")
                 else:
@@ -199,12 +254,18 @@ class ProcessThread(QObject):
                     self.show_match_dist.emit("None")
                     self.show_match_id.emit("None")
                     self.show_match_status.emit("未命中")
-                self.show_img.emit(_image)
+                
+                # 控制UI更新频率，避免递归重绘
+                self.ui_update_counter += 1
+                if self.ui_update_counter >= self.ui_update_interval:
+                    self.ui_update_counter = 0
+                    self.show_img.emit(_image)
+                
                 process_value = int((proc_dir_index)/all_count*1000)
                 self.progress_bar.emit(process_value)
                 if process_value == 1000:
                     break
-    
+
     def draw_track(self,frame, boxes, track_ids, clss, track_history):
         for box, track_id, cls in zip(boxes, track_ids, clss):
             annotator = Annotator(frame, example=str(cfgs.YOLO_LABELS))
@@ -224,7 +285,13 @@ class ProcessThread(QObject):
 
     def draw_match(self, _image, boxes, match_ids):
         for _idx, (box, cls) in enumerate(zip(boxes, match_ids)):
-            _image = draw_chinese_box(_image,font="./models/SimHei.ttf",box=box,label=cls,color=(0,255,0))
+            _image = draw_chinese_box(
+                _image,
+                font=os.path.join(cfgs.MODELS_DIR, "SimHei.ttf"),
+                box=box,
+                label=cls,
+                color=(0,255,0),
+            )
         return _image
     
     def proc_start_run_media_type(self):
@@ -281,13 +348,18 @@ class ProcessThread(QObject):
                         boxes = filter_bbox_list
                     else:
                         self.draw_box(_image, boxes, labels)
-                search_labels_list, search_dist_list, target_box_list, before_sort_list = self.reid_pipeline.search(proc_img, boxes, self.match_thresh)
+                ir_frame = self._read_ir_frame(frame_count)
+                search_labels_list, search_dist_list, target_box_list, before_sort_list, before_dist_list = self.reid_pipeline.search(
+                    proc_img, boxes, self.match_thresh, ir_img=ir_frame,
+                )
                 if _inter_type == 'video':
                     happend_time = round((frame_count + 1)/_fps, 3)
                     if self.is_track and track_ids is not None:
                         for _idx, _e_sort_box in enumerate(boxes):
                             if before_sort_list[_idx] != "unknown":
-                                self.had_track_id_dict[filter_trackid_list[_idx]][1] = before_sort_list[_idx]
+                                dist_val = before_dist_list[_idx]
+                                if dist_val is not None and dist_val <= self.track_lock_dist_thresh:
+                                    self.had_track_id_dict[filter_trackid_list[_idx]][1] = before_sort_list[_idx]
                         ## had_search_trackid
                         search_labels_list.extend([row[1] for row in had_search_trackid_list])
                         target_box_list.extend([row[0] for row in had_search_trackid_list])
@@ -297,12 +369,12 @@ class ProcessThread(QObject):
                 if len(target_box_list) > 0:
                     _image = self.draw_match(_image, target_box_list, search_labels_list)
                     for _idx, _e_dist in enumerate(search_dist_list):
-                        rows = [self.proc_source_url, self.reid_pipeline._target_class, frame_count, happend_time, search_dist_list[_idx][0], "{}:{}".format("命中", search_labels_list[_idx]),"[{}]".format(','.join(map(str,map(int, target_box_list[_idx][:4]))))]
+                        rows = [self.proc_source_url, self.reid_pipeline._target_class, frame_count, happend_time, search_dist_list[_idx], "{}:{}".format("命中", search_labels_list[_idx]),"[{}]".format(','.join(map(str,map(int, target_box_list[_idx][:4]))))]
                         self.table_info_list.emit(rows)
                         bb = target_box_list[_idx]
                         crop_img =  proc_img[int(bb[1]):int(bb[3]),int(bb[0]):int(bb[2]),:]
                         self.show_target_img.emit(crop_img)
-                        self.show_match_dist.emit(str(search_dist_list[_idx][0]))
+                        self.show_match_dist.emit(str(search_dist_list[_idx]))
                         self.show_match_id.emit(search_labels_list[_idx])
                         self.show_match_status.emit("命中")
                 else:
@@ -315,7 +387,12 @@ class ProcessThread(QObject):
                     self.show_match_id.emit("None")
                     self.show_match_status.emit("未命中")
                 
-                self.show_img.emit(_image)
+                # 控制UI更新频率，避免递归重绘
+                self.ui_update_counter += 1
+                if self.ui_update_counter >= self.ui_update_interval:
+                    self.ui_update_counter = 0
+                    self.show_img.emit(_image)
+                
                 process_value = int(frame_count/all_count*1000)
                 self.progress_bar.emit(process_value)
                 if process_value == 1000:
@@ -346,10 +423,17 @@ class PageProcess:
     save_threshold = 0.7  # Only save matches above this similarity threshold
 
     def set_proc_page(self):
-        base_feat_lists, base_idx_lists = qt_sql.load_sql_feat_info(cfgs.DB_PATH, cfgs.DB_NAME)
-        self.proc_class = ProcessThread(base_feat_lists, base_idx_lists, dims=1280, target_class = "person", device_info = "cpu")
+        base_feat_lists, base_idx_lists, modality_list = qt_sql.load_sql_feat_info(
+            cfgs.DB_PATH, cfgs.DB_NAME,
+        )
+        self.proc_class = ProcessThread(
+            base_feat_lists, base_idx_lists, dims=cfgs.DIMS,
+            target_class="person", device_info="cpu", modalities=modality_list,
+        )
         self.reid_pipeline = self.proc_class.reid_pipeline
+        self._setup_proc_ir_widgets()
         self.process_file_button.clicked.connect(self.proc_open_file_func)
+        self.process_ir_button.clicked.connect(self.proc_open_ir_file_func)
         self.process_dir_button.clicked.connect(self.proc_open_dir_func)
         self._process_info_model = QStandardItemModel(self)
         self._process_info_model.setHorizontalHeaderLabels(['来源', '类型', "帧数", "时间",'距离', '是否命中', "位置[x1,y1,x2,y2]"])
@@ -391,7 +475,7 @@ class PageProcess:
         hour = date_now.hour
         second = date_now.second
         result_dir = f"{year}_{month}_{hour}_{day}_{second}.mp4"
-        file_path = os.path.join("./outputs/video", result_dir)
+        file_path = os.path.join(OUTPUTS_DIR, "video", result_dir)
         folder_path = os.path.dirname(file_path)
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
@@ -444,10 +528,51 @@ class PageProcess:
                 self.show_status("Pause...")
                 self.proc_run_button.setChecked(False)
     
+    def _setup_proc_ir_widgets(self):
+        self.process_ir_button = QPushButton("打开红外源", self.proc)
+        self.process_ir_button.setObjectName("process_ir_button")
+        self.process_ir_button.setMinimumHeight(28)
+        self.process_ir_edit = QLineEdit(self.proc)
+        self.process_ir_edit.setObjectName("process_ir_edit")
+        self.process_ir_edit.setReadOnly(True)
+        self.process_ir_edit.setPlaceholderText("  可选：红外视频/图像（与可见光帧对齐）")
+        if hasattr(self, "horizontalLayout_proc_top"):
+            self.horizontalLayout_proc_top.addWidget(self.process_ir_button)
+            self.horizontalLayout_proc_top.addWidget(self.process_ir_edit)
+        elif hasattr(self, "process_file_edit") and self.process_file_edit.parentWidget():
+            layout = self.process_file_edit.parentWidget().layout()
+            if layout is not None:
+                layout.addWidget(self.process_ir_button)
+                layout.addWidget(self.process_ir_edit)
+
+    def proc_open_ir_file_func(self):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        config_file = os.path.join(CONFIG_DIR, 'proc_ir_fold.json')
+        if os.path.exists(config_file):
+            config = json.load(open(config_file, 'r', encoding='utf-8'))
+            open_fold = config.get('open_fold', os.getcwd())
+            if not os.path.exists(open_fold):
+                open_fold = os.getcwd()
+        else:
+            config = {}
+            open_fold = os.getcwd()
+        name, _ = QFileDialog.getOpenFileName(
+            self, 'Infrared video/image', open_fold,
+            "Media(*.mp4 *.mkv *.avi *.flv *.jpg *.png *.jpeg *.tif *.tiff)",
+        )
+        if name:
+            self.proc_class.proc_ir_source_url = name
+            self.proc_class._reset_ir_reader()
+            config['open_fold'] = os.path.dirname(name)
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+            self.process_ir_edit.setText(name)
+
     def proc_stop(self):
         if self.process_thread.isRunning():
             self.process_thread.quit()
         self.proc_class.stop_dtc = True
+        self.proc_class._reset_ir_reader()
         self.proc_class.reid_pipeline.reset_track()
         self.proc_run_button.setChecked(False)
         self.progress_bar.setValue(0)
@@ -478,7 +603,8 @@ class PageProcess:
         self.dist_rank_thresh = dist
 
     def proc_open_dir_func(self):
-        config_file = './config/proc_fold_dir.json'
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        config_file = os.path.join(CONFIG_DIR, 'proc_fold_dir.json')
         if os.path.exists(config_file):  
             config = json.load(open(config_file, 'r', encoding='utf-8'))
             open_fold = config['open_fold']     
@@ -500,7 +626,8 @@ class PageProcess:
             self.proc_stop()
     
     def proc_open_file_func(self):
-        config_file = './config/proc_fold.json'
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        config_file = os.path.join(CONFIG_DIR, 'proc_fold.json')
         if os.path.exists(config_file):  
             config = json.load(open(config_file, 'r', encoding='utf-8'))
             open_fold = config['open_fold']     
@@ -527,9 +654,19 @@ class PageProcess:
     
     def show_image(self, img_src, label):
         try:
+            if img_src is None or img_src.size == 0:
+                return
+            
             ih, iw, _ = img_src.shape
+            if ih == 0 or iw == 0:
+                return
+                
             w = label.geometry().width()
             h = label.geometry().height()
+            
+            if w == 0 or h == 0:
+                return
+                
             # keep the original data ratio
             if iw/w > ih/h:
                 scal = w / iw
@@ -545,35 +682,44 @@ class PageProcess:
             frame = cv2.cvtColor(img_src_, cv2.COLOR_BGR2RGB)
             img = QImage(frame.data, frame.shape[1], frame.shape[0], frame.shape[2] * frame.shape[1],
                          QImage.Format_RGB888)
-            label.setPixmap(QPixmap.fromImage(img))
+            
+            # 直接设置图片（信号已经在主线程处理）
+            if label.isVisible():
+                label.setPixmap(QPixmap.fromImage(img))
 
             # 如果是匹配图片，保存图片信息
             if label.objectName() == "match_show_img":
-                current_row = self._process_info_model.rowCount() - 1
-                if current_row >= 0:
-                    frame_num = self._process_info_model.item(current_row, 2).text()
-                    match_id = self.match_show_id.text()
-                    match_status = self.match_show_status.text()
-                    match_dist = self.match_show_dist.text()
-                    
-                    if "命中" in match_status:
-                        self.frame_images[frame_num] = {
-                            'crop_img': img_src.copy(),  # 保存原始图片
-                            'id': match_id,
-                            'status': match_status,
-                            'dist': match_dist
-                        }
-                        self.current_match_image = img_src.copy()
+                try:
+                    current_row = self._process_info_model.rowCount() - 1
+                    if current_row >= 0:
+                        frame_num = self._process_info_model.item(current_row, 2).text()
+                        match_id = self.match_show_id.text()
+                        match_status = self.match_show_status.text()
+                        match_dist = self.match_show_dist.text()
+                        
+                        if "命中" in match_status:
+                            self.frame_images[frame_num] = {
+                                'crop_img': img_src.copy(),
+                                'id': match_id,
+                                'status': match_status,
+                                'dist': match_dist
+                            }
+                            self.current_match_image = img_src.copy()
+                except Exception as inner_e:
+                    print("Error saving match info:", str(inner_e))
 
         except Exception as e:
-            print(repr(e))
+            print("Error in show_image:", repr(e))
             print(traceback.print_exc())
         finally:
-            if label.objectName() == "det_pano_img" and self.is_save_video:
-                if self.video_writer is None:
-                    self.video_writer = self.register_video_writer()
-                img_src_ = cv2.resize(img_src, (1280, 720))
-                self.video_writer.write(img_src_)
+            try:
+                if label.objectName() == "det_pano_img" and self.is_save_video:
+                    if self.video_writer is None:
+                        self.video_writer = self.register_video_writer()
+                    img_src_ = cv2.resize(img_src, (1280, 720))
+                    self.video_writer.write(img_src_)
+            except Exception as e:
+                print("Error saving video frame:", str(e))
 
     def save_as_csv(self):
         date_now = datetime.datetime.now()
@@ -583,7 +729,7 @@ class PageProcess:
         hour = date_now.hour
         second = date_now.second
         result_dir = f"{year}_{month}_{hour}_{day}_{second}.csv"
-        file_path = os.path.join("./outputs/csv/", result_dir)
+        file_path = os.path.join(OUTPUTS_DIR, "csv", result_dir)
         folder_path = os.path.dirname(file_path)
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
@@ -632,7 +778,8 @@ class PageProcess:
                 default_filename = f"match_{match_id}_{match_dist}_{timestamp}.jpg"
                 
                 # Get default save directory from config or create new one
-                config_file = './config/save_matches.json'
+                os.makedirs(CONFIG_DIR, exist_ok=True)
+                config_file = os.path.join(CONFIG_DIR, 'save_matches.json')
                 save_fold = os.getcwd()
                 
                 if os.path.exists(config_file):
@@ -643,9 +790,6 @@ class PageProcess:
                                 save_fold = config['save_fold']
                     except:
                         pass
-                
-                # Create config directory if it doesn't exist
-                os.makedirs(os.path.dirname(config_file), exist_ok=True)
                 
                 # Open file dialog for user to choose save location
                 save_path, _ = QFileDialog.getSaveFileName(

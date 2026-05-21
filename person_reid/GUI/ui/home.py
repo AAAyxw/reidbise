@@ -1752,7 +1752,7 @@ class Ui_MainWindow(object):
         self.thresh_slider.setMinimum(10)
         self.thresh_slider.setMaximum(50)
         self.thresh_slider.setSingleStep(1)
-        self.thresh_slider.setValue(20)
+        self.thresh_slider.setValue(15)
         self.thresh_slider.setOrientation(Qt.Horizontal)
 
         self.gridLayout_8.addWidget(self.thresh_slider, 1, 1, 1, 1)
@@ -1793,7 +1793,7 @@ class Ui_MainWindow(object):
         self.thresh_spinbox.setMinimum(0.100000000000000)
         self.thresh_spinbox.setMaximum(0.500000000000000)
         self.thresh_spinbox.setSingleStep(0.010000000000000)
-        self.thresh_spinbox.setValue(0.200000000000000)
+        self.thresh_spinbox.setValue(0.150000000000000)
 
         self.gridLayout_8.addWidget(self.thresh_spinbox, 1, 0, 1, 1)
 

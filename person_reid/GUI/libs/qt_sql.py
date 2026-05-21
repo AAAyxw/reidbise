@@ -1,8 +1,14 @@
-from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QTableView, QPushButton
-from PySide6.QtSql import QSqlDatabase, QSqlQueryModel, QSqlQuery
+from PySide6.QtSql import QSqlDatabase, QSqlQuery
 from Algorithm.libs.logger.log import get_logger
 
 log_info = get_logger(__name__)
+
+_REID_COLUMNS = (
+    "id integer primary key, "
+    "name text, category varchar, box text, feat text, image varchar, "
+    "modality varchar, image_ir varchar"
+)
+
 
 def init_db(db_path, db_name):
     db = QSqlDatabase.addDatabase("QSQLITE")
@@ -12,12 +18,29 @@ def init_db(db_path, db_name):
         log_info.error("{}_{} Unable to open database.".format(db_path, db_name))
         return False
     query = QSqlQuery()
-    query.exec_("CREATE TABLE IF NOT EXISTS {} (id integer primary key, name text, category varchar, box text, feat text, image varchar)".format(db_name))
+    query.exec_("CREATE TABLE IF NOT EXISTS {} ({})".format(db_name, _REID_COLUMNS))
+    _migrate_reid_table(query, db_name)
     return True
+
+
+def _table_has_column(query, db_name, column):
+    query.exec_("PRAGMA table_info({})".format(db_name))
+    while query.next():
+        if query.value(1) == column:
+            return True
+    return False
+
+
+def _migrate_reid_table(query, db_name):
+    for col_name, col_type in (("modality", "varchar"), ("image_ir", "varchar")):
+        if not _table_has_column(query, db_name, col_name):
+            query.exec_("ALTER TABLE {} ADD COLUMN {} {}".format(db_name, col_name, col_type))
+
 
 def check(func, *args):
     if not func(*args):
         raise ValueError(func.__self__.lastError())
+
 
 def load_sql_feat_info(db_path, db_name):
     db = QSqlDatabase.addDatabase("QSQLITE")
@@ -25,25 +48,24 @@ def load_sql_feat_info(db_path, db_name):
     if not db.open():
         print("Error: Unable to open database")
         log_info.error("{}_{} Unable to open database.".format(db_path, db_name))
-        return False
+        return [], [], []
     query = QSqlQuery()
-    query.exec("SELECT name, feat FROM {}".format(db_name))
+    query.exec("SELECT name, feat, modality FROM {}".format(db_name))
     feat_list = []
     label_list = []
+    modality_list = []
     if not query.isActive():
         log_info.error("{}_{} query feature error.".format(db_path, db_name))
         print("Error:", query.lastError().text())
     else:
-        results = []
         while query.next():
-            # 通过列索引检索数据
-            data1 = query.value(0)  # 第一列的值
-            data2 = query.value(1)  # 第二列的值
-            label_list.append(data1)
-            feat_list.append(list(map(float,data2.split(','))))
-    return feat_list, label_list
+            label_list.append(query.value(0))
+            feat_list.append(list(map(float, query.value(1).split(','))))
+            modality_list.append(query.value(2) or "visible")
+    return feat_list, label_list, modality_list
 
-def _add_register(db_path, db_name, name, category, box, feat, image):
+
+def _add_register(db_path, db_name, name, category, box, feat, image, modality="visible", image_ir=""):
     db = QSqlDatabase.addDatabase("QSQLITE")
     db.setDatabaseName(db_path)
     if not db.open():
@@ -51,17 +73,20 @@ def _add_register(db_path, db_name, name, category, box, feat, image):
         log_info.error("{}_{} Unable to open database.".format(db_path, db_name))
         return False
     q = QSqlQuery()
-    INSERT_BOOK_SQL = "insert into {}(name, category, box, feat, image) values(?, ?, ?, ?, ?)".format(db_name)
-    check(q.prepare, INSERT_BOOK_SQL)
+    insert_sql = (
+        "insert into {}(name, category, box, feat, image, modality, image_ir) "
+        "values(?, ?, ?, ?, ?, ?, ?)"
+    ).format(db_name)
+    check(q.prepare, insert_sql)
     q.addBindValue(name)
     q.addBindValue(category)
     q.addBindValue(box)
     q.addBindValue(feat)
     q.addBindValue(image)
+    q.addBindValue(modality)
+    q.addBindValue(image_ir or "")
     q.exec()
     if q.lastError().isValid():
-        # 查询执行失败，输出错误信息
         print("Error:", q.lastError().text())
     else:
-        # 查询执行成功
         print("Query executed successfully")
